@@ -147,12 +147,18 @@ You can follow these steps to generate a PageIndex tree from a PDF document.
 pip3 install --upgrade -r requirements.txt
 ```
 
-### 2. Set your OpenAI API key
+### 2. Set your API key
 
 Create a `.env` file in the root directory and add your API key:
 
+**For OpenAI:**
 ```bash
 CHATGPT_API_KEY=your_openai_key_here
+```
+
+**For OpenRouter:**
+```bash
+OPENROUTER_API_KEY=your_openrouter_key_here
 ```
 
 ### 3. Run PageIndex on your PDF
@@ -167,13 +173,41 @@ python3 run_pageindex.py --pdf_path /path/to/your/document.pdf
 You can customize the processing with additional optional arguments:
 
 ```
---model                 OpenAI model to use (default: gpt-4o-2024-11-20)
+--model                 Default model to use (default: gpt-4o-2024-11-20)
+--api-provider          API provider (openai, openrouter, default: openai)
+--api-base-url          Custom API base URL (for OpenRouter or other APIs)
+--model-name            Provider-specific model name (overrides --model)
 --toc-check-pages       Pages to check for table of contents (default: 20)
 --max-pages-per-node    Max pages per node (default: 10)
 --max-tokens-per-node   Max tokens per node (default: 20000)
 --if-add-node-id        Add node ID (yes/no, default: yes)
 --if-add-node-summary   Add node summary (yes/no, default: yes)
 --if-add-doc-description Add doc description (yes/no, default: yes)
+```
+
+### Provider-Specific Examples
+
+Using OpenRouter with different models:
+```bash
+# Using OpenRouter with Anthropic Claude
+python3 run_pageindex.py --pdf_path document.pdf \
+  --api-provider openrouter \
+  --model claude-3-5-sonnet-20241022
+
+# Using OpenRouter with Google Gemini
+python3 run_pageindex.py --pdf_path document.pdf \
+  --api-provider openrouter \
+  --model google/gemini-3-flash-preview
+
+# Using OpenRouter with Meta Llama
+python3 run_pageindex.py --pdf_path document.pdf \
+  --api-provider openrouter \
+  --model meta-llama/llama-3.1-70b-instruct
+
+# Using custom API endpoint
+python3 run_pageindex.py --pdf_path document.pdf \
+  --api-base-url https://your-custom-api.com/v1 \
+  --model your-custom-model
 ```
 </details>
 
