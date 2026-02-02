@@ -1,8 +1,9 @@
 import argparse
 import os
 import json
-from pageindex import *
+from pageindex.page_index import page_index_main
 from pageindex.page_index_md import md_to_tree
+from pageindex.utils import ConfigLoader
 
 if __name__ == "__main__":
     # Set up argument parser
@@ -11,6 +12,10 @@ if __name__ == "__main__":
     parser.add_argument('--md_path', type=str, help='Path to the Markdown file')
 
     parser.add_argument('--model', type=str, default='gpt-4o-2024-11-20', help='Model to use')
+    parser.add_argument('--api-provider', type=str, default='openai', choices=['openai', 'openrouter'], help='API provider to use')
+    parser.add_argument('--api-base-url', type=str, default='', help='Custom API base URL (for OpenRouter or other compatible APIs)')
+    parser.add_argument('--model-name', type=str, default='', help='Provider-specific model name (overrides --model for some providers)')
+    parser.add_argument('--env-model-var', type=str, default='', help='Environment variable name containing model (e.g., MODEL_FREE, MODEL_FAST)')
 
     parser.add_argument('--toc-check-pages', type=int, default=20, 
                       help='Number of pages to check for table of contents (PDF only)')
@@ -51,19 +56,30 @@ if __name__ == "__main__":
             raise ValueError(f"PDF file not found: {args.pdf_path}")
             
         # Process PDF file
-        # Configure options
-        opt = config(
-            model=args.model,
-            toc_check_page_num=args.toc_check_pages,
-            max_page_num_each_node=args.max_pages_per_node,
-            max_token_num_each_node=args.max_tokens_per_node,
-            if_add_node_id=args.if_add_node_id,
-            if_add_node_summary=args.if_add_node_summary,
-            if_add_doc_description=args.if_add_doc_description,
-            if_add_node_text=args.if_add_node_text
-        )
+        # Use ConfigLoader to configure options
+        config_loader = ConfigLoader()
+
+        # Create options dict with user args
+        user_opt = {
+            'model': args.model,
+            'api_provider': args.api_provider,
+            'api_base_url': args.api_base_url,
+            'model_name': args.model_name,
+            'env_model_var': args.env_model_var,
+            'toc_check_page_num': args.toc_check_pages,
+            'max_page_num_each_node': args.max_pages_per_node,
+            'max_token_num_each_node': args.max_tokens_per_node,
+            'if_add_node_id': args.if_add_node_id,
+            'if_add_node_summary': args.if_add_node_summary,
+            'if_add_doc_description': args.if_add_doc_description,
+            'if_add_node_text': args.if_add_node_text
+        }
+
+        # Load config with defaults from config.yaml
+        opt = config_loader.load(user_opt)
 
         # Process the PDF
+        # Note: page_index_main is a sync wrapper that handles asyncio internally
         toc_with_page_number = page_index_main(args.pdf_path, opt)
         print('Parsing done, saving to file...')
         
@@ -98,6 +114,10 @@ if __name__ == "__main__":
         # Create options dict with user args
         user_opt = {
             'model': args.model,
+            'api_provider': args.api_provider,
+            'api_base_url': args.api_base_url,
+            'model_name': args.model_name,
+            'env_model_var': args.env_model_var,
             'if_add_node_summary': args.if_add_node_summary,
             'if_add_doc_description': args.if_add_doc_description,
             'if_add_node_text': args.if_add_node_text,
