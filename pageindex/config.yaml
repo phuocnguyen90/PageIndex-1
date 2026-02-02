@@ -6,3 +6,9 @@ if_add_node_id: "yes"
 if_add_node_summary: "yes"
 if_add_doc_description: "no"
 if_add_node_text: "no"
+
+# API Configuration - supports multiple providers
+api_provider: "openai"  # Options: "openai", "openrouter"
+api_base_url: ""  # Custom API endpoint (leave empty for default)
+model_name: ""  # Alternative to 'model' - specify provider-specific model name
+env_model_var: ""  # Environment variable name containing model (e.g., MODEL_FREE)
