@@ -6,6 +6,9 @@ import os
 import io
 import json
 import asyncio
+import logging
+import threading
+import concurrent.futures
 from pathlib import Path
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
@@ -15,6 +18,69 @@ from streamlit import runtime
 
 # Load environment variables
 load_dotenv()
+
+# Setup logging
+def setup_logging():
+    """Setup logging for Streamlit app and PageIndex modules"""
+    # Create root logger to capture all module logs
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    # Avoid adding multiple handlers if they already exist
+    if not root_logger.handlers:
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        # Console handler (stderr)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+
+        # Stdout handler (for some environments where stderr isn't shown)
+        import sys
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(formatter)
+        root_logger.addHandler(stdout_handler)
+
+        # File handler
+        file_handler = logging.FileHandler('streamlit_app.log')
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    # Suppress verbose logs from third-party libraries
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Return the app-specific logger for convenience
+    return logging.getLogger("streamlit_app")
+
+# Streamlit log handler for real-time display
+class StreamlitLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.log_messages = []
+
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.log_messages.append(log_entry)
+        # Keep only last 50 messages
+        if len(self.log_messages) > 50:
+            self.log_messages = self.log_messages[-50:]
+
+# Initialize logging
+if 'streamlit_handler' not in st.session_state:
+    st.session_state.streamlit_handler = StreamlitLogHandler()
+    st.session_state.streamlit_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger = setup_logging()
+streamlit_handler = st.session_state.streamlit_handler
+
+# Ensure streamlit_handler is added to root logger if not already present
+root_logger = logging.getLogger()
+if streamlit_handler not in root_logger.handlers:
+    root_logger.addHandler(streamlit_handler)
 
 # Page config
 st.set_page_config(
@@ -59,7 +125,7 @@ st.markdown("""
 # Import PageIndex modules
 from pageindex.utils import ChatGPT_API_async, resolve_model_name
 from pageindex.page_index import page_index_main
-from pageindex.page_index_md import page_index_main_md
+from pageindex.page_index_md import md_to_tree
 from pageindex.utils import ConfigLoader
 from pageindex.cost_tracker import get_global_tracker, reset_global_tracker
 
@@ -68,10 +134,14 @@ if "document_structure" not in st.session_state:
     st.session_state.document_structure = None
 if "document_name" not in st.session_state:
     st.session_state.document_name = None
+if "document_path" not in st.session_state:
+    st.session_state.document_path = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "selected_model" not in st.session_state:
     st.session_state.selected_model = None
+if "selected_model_key" not in st.session_state:
+    st.session_state.selected_model_key = None
 if "cost_summary" not in st.session_state:
     st.session_state.cost_summary = None
 
@@ -97,12 +167,15 @@ def get_available_models() -> Dict[str, str]:
 
 def save_uploaded_file(uploaded_file) -> str:
     """Save uploaded file to temporary location"""
+    logger.info(f"Saving file: {uploaded_file.name}")
     temp_dir = Path("data/uploads")
     temp_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Using temp directory: {temp_dir}")
 
     file_path = temp_dir / uploaded_file.name
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
+    logger.info(f"File saved to: {file_path}")
     return str(file_path)
 
 
@@ -126,9 +199,54 @@ def format_structure_for_chat(structure: dict) -> str:
     return formatted
 
 
-async def analyze_document(file_path: str, model_var: str, doc_type: str) -> dict:
+def run_async(coro):
+    """Helper function to run async code in Streamlit safely"""
+    import threading
+    import concurrent.futures
+
+    try:
+        # If we are already in an event loop, we need to run in a separate thread
+        try:
+            loop = asyncio.get_running_loop()
+            
+            result_container = []
+            def run_in_new_loop():
+                # Force a new event loop for this thread
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    result = new_loop.run_until_complete(coro)
+                    result_container.append(result)
+                except Exception as e:
+                    logger.error(f"Error in async thread: {e}", exc_info=True)
+                    result_container.append(e)
+                finally:
+                    new_loop.close()
+
+            thread = threading.Thread(target=run_in_new_loop)
+            thread.start()
+            thread.join()
+            
+            if result_container and isinstance(result_container[0], Exception):
+                raise result_container[0]
+            return result_container[0] if result_container else None
+            
+        except RuntimeError:
+            # No running loop, safe to use asyncio.run
+            return asyncio.run(coro)
+
+    except Exception as e:
+        logger.error(f"Async execution failed: {e}", exc_info=True)
+        raise e
+
+def analyze_document(file_path: str, model_var: str, doc_type: str) -> dict:
     """Analyze document using PageIndex"""
     try:
+        logger.info(f"Starting analysis for document: {file_path}")
+        logger.info(f"Document type: {doc_type}, Model variable: {model_var}")
+
+        st.info(f"🔍 Starting analysis for: {os.path.basename(file_path)}")
+
         config_loader = ConfigLoader()
         config = config_loader.load({
             "env_model_var": model_var,
@@ -137,35 +255,78 @@ async def analyze_document(file_path: str, model_var: str, doc_type: str) -> dic
             "if_add_doc_description": "yes"
         })
 
-        if doc_type == "pdf":
-            result = await page_index_main(
-                pdf_path=file_path,
-                opt=config
-            )
-        else:  # markdown
-            result = await page_index_main_md(
-                md_path=file_path,
-                model=config.model,
-                if_thinning="no",
-                summary_token_threshold=200,
-                if_add_node_id="yes",
-                if_add_node_summary="yes",
-                if_add_doc_description="yes"
-            )
+        # Resolve the actual model name (e.g., from MODEL_FREE)
+        config.model = resolve_model_name(
+            model=config.model,
+            api_provider=getattr(config, 'api_provider', None),
+            model_name=getattr(config, 'model_name', None),
+            env_model_var=getattr(config, 'env_model_var', None)
+        )
 
-        # Load the generated structure
-        result_file = Path("results") / f"{Path(file_path).stem}_structure.json"
-        if result_file.exists():
-            with open(result_file, 'r') as f:
-                return json.load(f)
-        return None
+        logger.info(f"Configuration loaded: Model={config.model}, Provider={getattr(config, 'api_provider', 'openai')}")
+
+        if doc_type == "pdf":
+            logger.info("Processing PDF document...")
+            st.info("📄 Processing PDF document...")
+            
+            # Use run_async to wrap the synchronous page_index_main if it uses asyncio.run
+            # to avoid event loop conflicts in Streamlit
+            def sync_wrapper():
+                return page_index_main(file_path, opt=config)
+            
+            # Since page_index_main calls asyncio.run, we use a thread pool to avoid loop conflicts
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(sync_wrapper)
+                result = future.result()
+                
+            logger.info("PDF processing completed")
+            st.success("✅ PDF processing completed!")
+        else:  # markdown
+            logger.info("Processing Markdown document...")
+            st.info("📝 Processing Markdown document...")
+            # md_to_tree is async, need to run it properly
+            result = run_async(md_to_tree(
+                md_path=file_path,
+                if_thinning=False,
+                min_token_threshold=5000,
+                if_add_node_summary=getattr(config, 'if_add_node_summary', 'yes') == 'yes',
+                summary_token_threshold=200,
+                model=config.model,
+                if_add_doc_description=getattr(config, 'if_add_doc_description', 'no') == 'yes',
+                if_add_node_text=getattr(config, 'if_add_node_text', 'no') == 'no',
+                if_add_node_id=getattr(config, 'if_add_node_id', 'yes') == 'yes'
+            ))
+            logger.info("Markdown processing completed")
+            st.success("✅ Markdown processing completed!")
+
+        if result:
+            # Save the results to the results folder
+            results_dir = Path("results")
+            results_dir.mkdir(exist_ok=True)
+            result_file = results_dir / f"{Path(file_path).stem}_structure.json"
+            
+            logger.info(f"Saving results to: {result_file}")
+            with open(result_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            
+            st.success(f"✅ Analysis complete! Found {len(result.get('structure', []))} main sections.")
+            return result
+        else:
+            logger.error("Analysis failed to produce a result")
+            st.error("❌ Analysis failed to produce a result.")
+            return None
+
     except Exception as e:
-        st.error(f"Error analyzing document: {e}")
+        logger.error(f"Error analyzing document: {e}", exc_info=True)
+        st.error(f"❌ Error analyzing document: {e}")
         return None
 
 
 async def chat_with_document(query: str, model_name: str, structure: dict) -> str:
     """Chat with the analyzed document"""
+    logger.info(f"Chat query: {query[:100]}... using model: {model_name}")
+
     # Format structure for context
     doc_context = format_structure_for_chat(structure)
 
@@ -182,9 +343,12 @@ User Question: {query}
 Please provide a comprehensive answer based on the document structure and content above."""
 
     try:
+        logger.info("Sending query to AI model...")
         response = await ChatGPT_API_async(model=model_name, prompt=prompt)
+        logger.info("AI response received successfully")
         return response
     except Exception as e:
+        logger.error(f"Error in chat: {e}", exc_info=True)
         return f"Error: {e}"
 
 
@@ -193,8 +357,10 @@ with st.sidebar:
     st.markdown("## ⚙️ Settings")
 
     # Model selection
+    logger.info("Getting available models...")
     available_models = get_available_models()
     model_options = list(available_models.keys())
+    logger.info(f"Available models: {model_options}")
 
     if model_options:
         selected_model_key = st.selectbox(
@@ -203,9 +369,12 @@ with st.sidebar:
             index=0,
             help="Choose the AI model to use for analysis and chat"
         )
+        st.session_state.selected_model_key = selected_model_key
         st.session_state.selected_model = available_models[selected_model_key]
+        logger.info(f"Selected model: {st.session_state.selected_model}")
         st.caption(f"Using: {st.session_state.selected_model}")
     else:
+        logger.warning("No models found in environment")
         st.warning("No models found in environment. Please set MODEL_FREE, MODEL_FAST, or MODEL_REASONING in your .env file.")
         st.session_state.selected_model = "gpt-4o"
 
@@ -288,57 +457,59 @@ with col2:
     )
 
 if uploaded_file:
+    logger.info(f"File uploaded: {uploaded_file.name}")
     # Check if it's a different file
     if st.session_state.document_name != uploaded_file.name:
+        logger.info("New file detected, saving...")
         with st.spinner("Saving uploaded file..."):
             file_path = save_uploaded_file(uploaded_file)
+            logger.info(f"File saved to: {file_path}")
             st.session_state.document_name = uploaded_file.name
+            st.session_state.document_path = file_path  # Store path for analysis
             st.session_state.document_structure = None
             st.session_state.chat_history = []
             st.success(f"File saved: {uploaded_file.name}")
 
-        # Auto-analyze button
-        st.markdown("---")
-        st.markdown('<h2 class="section-header">🔍 Analyze Document</h2>', unsafe_allow_html=True)
+    # Auto-analyze button
+    st.markdown("---")
+    st.markdown('<h2 class="section-header">🔍 Analyze Document</h2>', unsafe_allow_html=True)
 
+    with st.form("analyze_form"):
         col_a, col_b = st.columns([1, 3])
 
         with col_a:
-            analyze_button = st.button("⚡ Analyze", type="primary", use_container_width=True)
+            analyze_button = st.form_submit_button("⚡ Analyze", type="primary", use_container_width=True)
 
         with col_b:
             st.caption("Click to extract document structure and generate summaries")
 
         if analyze_button:
+            logger.info("Analyze button clicked!")
             if not st.session_state.selected_model:
                 st.error("Please select a model first")
             else:
-                with st.spinner(f"Analyzing document with {st.session_state.selected_model}..."):
+                logger.info("Analyze button clicked by user")
+                with st.spinner(f"🚀 Analyzing document with {st.session_state.selected_model}..."):
                     doc_type_param = "pdf" if doc_type == "PDF" else "md"
-                    model_var = list(available_models.keys())[model_options.index(selected_model_key)] if model_options else None
+                    model_var = st.session_state.get('selected_model_key', 'MODEL_FREE')
+                    logger.info(f"Starting analysis with model_var: {model_var}")
 
-                    # Run analysis
-                    loop = runtime.scriptrunner.add_script_run_ctx.get_script_run_ctx()._asyncio_loop
-                    if loop is None:
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
+                    # Run analysis (analyze_document is now synchronous)
+                    logger.info("Running analyze_document function...")
+                    structure = analyze_document(st.session_state.document_path, model_var, doc_type_param)
+                    logger.info("Analysis function completed")
 
-                    structure = loop.run_until_complete(
-                        analyze_document(file_path, model_var, doc_type_param)
-                    )
+                if structure:
+                    st.session_state.document_structure = structure
+                    st.success("✅ Document analyzed successfully!")
 
-                    if structure:
-                        st.session_state.document_structure = structure
-                        st.success("✅ Document analyzed successfully!")
+                    # Show cost summary for this analysis
+                    tracker = get_global_tracker()
+                    st.info(f"💰 Analysis Cost: ${tracker.get_total_cost():.6f} ({tracker.get_total_tokens()[2]:,} tokens)")
 
-                        # Show cost summary for this analysis
-                        tracker = get_global_tracker()
-                        st.info(f"💰 Analysis Cost: ${tracker.get_total_cost():.6f} ({tracker.get_total_tokens()[2]:,} tokens)")
-
-                        st.rerun()
-                    else:
-                        st.error("Failed to analyze document")
+                    st.rerun()
+                else:
+                    st.error("Failed to analyze document")
 
 # Display document structure if available
 if st.session_state.document_structure:
@@ -391,48 +562,67 @@ if st.session_state.document_structure:
 
     # Chat input
     st.markdown("---")
-    user_input = st.text_input(
-        "Ask a question about your document:",
-        placeholder="e.g., What are the main topics discussed in this document?",
-        key="chat_input"
-    )
+    with st.form("chat_form"):
+        col_send, col_clear = st.columns([1, 5])
 
-    col_send, col_clear = st.columns([1, 5])
+        with col_send:
+            send_button = st.form_submit_button("Send 📨", type="primary", use_container_width=True)
 
-    with col_send:
-        send_button = st.button("Send 📨", type="primary", use_container_width=True)
+        with col_clear:
+            clear_button = st.form_submit_button("Clear Chat History 🗑️")
 
-    with col_clear:
-        if st.button("Clear Chat History 🗑️"):
+        # Text input
+        user_input = st.text_input(
+            "Ask a question about your document:",
+            placeholder="e.g., What are the main topics discussed in this document?",
+            key="chat_input"
+        )
+
+        if clear_button:
             st.session_state.chat_history = []
             st.rerun()
 
-    if send_button and user_input:
-        # Add user message to history
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": user_input
-        })
+        if send_button and user_input:
+            # Add user message to history
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": user_input
+            })
+            logger.info(f"User sent chat message: {user_input[:100]}...")
 
-        # Get assistant response
-        with st.spinner("Thinking..."):
-            loop = runtime.scriptrunner.add_script_run_ctx.get_script_run_ctx()._asyncio_loop
-            if loop is None:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            # Get assistant response
+            with st.spinner("🤔 Thinking..."):
+                logger.info("Calling chat_with_document...")
+                response = run_async(
+                    chat_with_document(user_input, st.session_state.selected_model, structure)
+                )
+                logger.info("Chat response received")
 
-            response = loop.run_until_complete(
-                chat_with_document(user_input, st.session_state.selected_model, structure)
-            )
+            # Add assistant response to history
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": response
+            })
 
-        # Add assistant response to history
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": response
-        })
+            st.rerun()
 
-        st.rerun()
+# Real-time logging section
+with st.expander("📊 View Application Logs", expanded=False):
+    st.markdown("### Recent Log Messages")
+
+    # Display recent logs
+    if hasattr(streamlit_handler, 'log_messages'):
+        for log_msg in streamlit_handler.log_messages[-20:]:  # Show last 20 messages
+            if 'ERROR' in log_msg:
+                st.error(log_msg)
+            elif 'WARNING' in log_msg:
+                st.warning(log_msg)
+            elif 'INFO' in log_msg:
+                st.info(f"📝 {log_msg}")
+            else:
+                st.caption(f"⚪ {log_msg}")
+    else:
+        st.info("✅ Logging is active. Logs will appear here as you interact with the app.")
 
 # Footer
 st.markdown("---")

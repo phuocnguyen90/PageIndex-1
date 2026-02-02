@@ -104,12 +104,25 @@ class CostTracker:
             pricing = MODEL_PRICING[model]
             return pricing["input"], pricing["output"]
 
+        # Try prefix match (e.g., "gpt-4o-2024-11-20" matches "gpt-4o")
+        # We check from longest to shortest keys to avoid greedy matches
+        sorted_keys = sorted(MODEL_PRICING.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            if "/" not in key and model.startswith(key):
+                pricing = MODEL_PRICING[key]
+                return pricing["input"], pricing["output"]
+
         # Try to match base model name for OpenRouter models
         if "/" in model:
-            base_model = model.split("/")[1]
-            for key, pricing in MODEL_PRICING.items():
-                if base_model in key or key.endswith(base_model):
-                    return pricing["input"], pricing["output"]
+            parts = model.split("/")
+            if len(parts) > 1:
+                base_model = parts[1]
+                # Strip ":free" or other suffixes if present for matching
+                base_model_clean = base_model.split(":")[0]
+                
+                for key, pricing in MODEL_PRICING.items():
+                    if base_model_clean in key or key.endswith(base_model_clean):
+                        return pricing["input"], pricing["output"]
 
         # Default pricing (estimate)
         logger.warning(f"No pricing found for model {model}, using default estimate")

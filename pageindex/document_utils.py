@@ -264,7 +264,11 @@ def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
     if pdf_parser == "PyPDF2":
         pdf_reader = PyPDF2.PdfReader(pdf_path)
         page_list = []
-        for page_num in range(len(pdf_reader.pages)):
+        total_pages = len(pdf_reader.pages)
+        for page_num in range(total_pages):
+            if page_num % 20 == 0 or page_num == total_pages - 1:
+                logger.info(f"Extracting tokens from PDF page {page_num + 1}/{total_pages}...")
+            
             page = pdf_reader.pages[page_num]
             page_text = page.extract_text()
             token_length = len(enc.encode(page_text))
@@ -277,7 +281,11 @@ def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
         elif isinstance(pdf_path, str) and os.path.isfile(pdf_path) and pdf_path.lower().endswith(".pdf"):
             doc = pymupdf.open(pdf_path)
         page_list = []
-        for page in doc:
+        total_pages = len(doc)
+        for i, page in enumerate(doc):
+            if i % 20 == 0 or i == total_pages - 1:
+                logger.info(f"Extracting tokens from PDF page {i + 1}/{total_pages} (PyMuPDF)...")
+                
             page_text = page.get_text()
             token_length = len(enc.encode(page_text))
             page_list.append((page_text, token_length))
@@ -569,6 +577,13 @@ class JsonLogger:
         self.log_data = []
 
     def log(self, level, message, **kwargs):
+        # Log to standard logging module as well
+        log_level = getattr(logging, level, logging.INFO)
+        if isinstance(message, dict):
+            logger.log(log_level, json.dumps(message))
+        else:
+            logger.log(log_level, message)
+
         if isinstance(message, dict):
             self.log_data.append(message)
         else:

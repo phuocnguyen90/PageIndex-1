@@ -2,10 +2,13 @@ import asyncio
 import json
 import re
 import os
+import logging
 try:
     from .utils import *
 except:
     from utils import *
+
+logger = logging.getLogger(__name__)
 
 async def get_node_summary(node, summary_token_threshold=200, model=None):
     node_text = node.get('text')
@@ -244,30 +247,30 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_ad
     with open(md_path, 'r', encoding='utf-8') as f:
         markdown_content = f.read()
     
-    print(f"Extracting nodes from markdown...")
+    logger.info(f"Extracting nodes from markdown...")
     node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
 
-    print(f"Extracting text content from nodes...")
+    logger.info(f"Extracting text content from nodes...")
     nodes_with_content = extract_node_text_content(node_list, markdown_lines)
     
     if if_thinning:
         nodes_with_content = update_node_list_with_text_token_count(nodes_with_content, model=model)
-        print(f"Thinning nodes...")
+        logger.info(f"Thinning nodes...")
         nodes_with_content = tree_thinning_for_index(nodes_with_content, min_token_threshold, model=model)
     
-    print(f"Building tree from nodes...")
+    logger.info(f"Building tree from nodes...")
     tree_structure = build_tree_from_nodes(nodes_with_content)
 
     if if_add_node_id == 'yes':
         write_node_id(tree_structure)
 
-    print(f"Formatting tree structure...")
+    logger.info(f"Formatting tree structure...")
     
     if if_add_node_summary == 'yes':
         # Always include text for summary generation
         tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'text', 'line_num', 'nodes'])
         
-        print(f"Generating summaries for each node...")
+        logger.info(f"Generating summaries for each node...")
         tree_structure = await generate_summaries_for_structure_md(tree_structure, summary_token_threshold=summary_token_threshold, model=model)
         
         if if_add_node_text == 'no':
@@ -275,7 +278,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_ad
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
         
         if if_add_doc_description == 'yes':
-            print(f"Generating document description...")
+            logger.info(f"Generating document description...")
             # Create a clean structure without unnecessary fields for description generation
             clean_structure = create_clean_structure_for_description(tree_structure)
             doc_description = generate_doc_description(clean_structure, model=model)
